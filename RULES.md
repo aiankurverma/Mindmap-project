@@ -47,7 +47,10 @@ in-browser checks described at the end.
 ## 5. Drag and drop
 5.1 Dragging a node drags its whole subtree. A ghost label follows the pointer; the source stays dimmed.
 5.2 Dropping a node anywhere on another node makes it (with its children) the last child of that node.
-    Dropping on its own descendant or on itself is ignored.
+    Exception: dropping on one of its own siblings reorders it before/after that sibling (by the sibling's midpoint),
+    because packed columns leave no blank gap to aim at. Dropping on its own descendant or on itself is ignored.
+5.2b Blank-space drops use the four-direction areas of rule 4.4: above/below a node → sibling before/after it (up/down),
+    beside a node's tip → its child (right), left of the parent's column → out-dent to a sibling of the parent (left).
 5.3 Dropping in the blank space between siblings reorders the node among them (above the target's midpoint = before,
     below = after). A thin accent line on the neighbour shows where it will land. No arrows and no text labels are shown.
 5.4 With several nodes selected, dragging any of them and dropping on a node moves all selected nodes under that node,

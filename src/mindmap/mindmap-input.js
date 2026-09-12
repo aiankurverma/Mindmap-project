@@ -41,8 +41,8 @@ export function attachInput(view) {
     else if (e.target === svg || e.target.closest('.mm-viewport') === view.viewport) view.select(null);
   };
   /** Classify a blank-space point relative to the visible nodes. Returns {kind:'sibling-before'|'sibling-after'|'child', node} or null. */
-  function blankZone(w) {
-    const nodes = view.getVisibleNodes();
+  function blankZone(w, exclude = null) {
+    const nodes = view.getVisibleNodes().filter(n => !exclude || !isDescendant(exclude, n));
     const k = view.transform.k;
     const CHILD_REACH = 380 / k;      // ~10 cm on screen, measured from the node's box
     // Rule 1 (highest priority): the strip beside a node's box — same height as the box, up to 10 cm from its tip — is
@@ -316,19 +316,28 @@ export function attachInput(view) {
     if (target && isDescendant(d.node, target)) target = null;
     // Drop zone: upper/lower quarter of a non-root target = insert as sibling before/after it; middle = as child.
     let zone = 'child', reorder = null;
-    if (target) zone = 'child';   // rule: a node dropped on another node becomes its child (with its whole subtree)
+    if (target && target.parent && target.parent === d.node.parent) {
+      // dropped on a SIBLING: reorder before/after it by its midpoint (dense columns leave no blank gap to aim at)
+      zone = w.y < target.y + target.h / 2 ? 'before' : 'after';
+    } else if (target) zone = 'child';   // rule: a node dropped on another node becomes its child (with its whole subtree)
     else if (d.node.parent) {
-      // Empty space: reorder among the dragged node's own siblings by vertical position (whole subtree moves).
-      const sibs = (d.node.parent.children || []).filter(c => c !== d.node && view.getVisibleNodes().includes(c));
-      if (sibs.length) {
-        let idx = sibs.length, mark = null, side = 'after';
-        for (let i = 0; i < sibs.length; i++) { const c = sibs[i]; if (w.y < c.y + c.h / 2) { idx = i; mark = c; side = 'before'; break; } }
-        if (!mark) { mark = sibs[sibs.length - 1]; side = 'after'; }
-        // index in the ORIGINAL sibling list (markdown.moveNode counts before removal)
-        const all = d.node.parent.children;
-        const anchor = all.indexOf(mark) + (side === 'after' ? 1 : 0);
-        const cur = all.indexOf(d.node);
-        if (anchor !== cur && anchor !== cur + 1) { zone = 'reorder'; reorder = { parent: d.node.parent, index: anchor, mark, side }; target = mark; }
+      // Empty space: four-direction placement using the same areas as double-click creation.
+      //   above/below a node  -> sibling before/after that node        (up / down)
+      //   beside a node's tip -> child of that node                     (right)
+      //   left of the parent  -> out-dent: sibling right after the parent (left)
+      const z = blankZone(w, d.node);
+      const all = d.node.parent.children;
+      const cur = all.indexOf(d.node);
+      if (z && z.kind === 'child' && z.node !== d.node.parent) {
+        zone = 'reorder'; reorder = { parent: z.node, index: undefined, mark: z.node, side: 'child' }; target = z.node;
+      } else if (z && z.kind !== 'child' && z.node !== d.node && z.node.parent) {
+        const p = z.node.parent, kids = p.children;
+        const anchor = kids.indexOf(z.node) + (z.kind === 'sibling-after' ? 1 : 0);
+        const same = p === d.node.parent;
+        if (!same || (anchor !== cur && anchor !== cur + 1)) { zone = 'reorder'; reorder = { parent: p, index: anchor, mark: z.node, side: z.kind === 'sibling-before' ? 'before' : 'after' }; target = z.node; }
+      } else if (d.node.parent.parent && (d.node.side === 'left' ? w.x > d.node.parent.x + d.node.parent.w : w.x < d.node.parent.x)) {
+        const gp = d.node.parent.parent; const anchor = gp.children.indexOf(d.node.parent) + 1;
+        zone = 'reorder'; reorder = { parent: gp, index: anchor, mark: d.node.parent, side: 'after' }; target = d.node.parent;
       }
     }
     if (target !== d.target || zone !== d.zone) {
@@ -364,7 +373,9 @@ export function attachInput(view) {
       return;
     }
     if (zone === 'reorder' && d.reorder) {
-      view.emit('node:move', { id: d.id, node: d.node, newParentId: d.reorder.parent.id, newParent: d.reorder.parent, index: d.reorder.index, zone: d.reorder.side });
+      const rp = d.reorder.parent;
+      if (isDescendant(d.node, rp) || rp === d.node) return;
+      view.emit('node:move', { id: d.id, node: d.node, newParentId: rp.id, newParent: rp, index: d.reorder.index, zone: d.reorder.side });
       return;
     }
     const parent = target.parent;
