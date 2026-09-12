@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mind Map engine demo</title>
+<style>
+  :root { --bg: #202020; --bg2: #161616; --text: #dadada; --muted: #999; --border: #333; --accent: #7f6df2; --accent2: #8a5cf5; --hover: rgba(255,255,255,.05); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  body { display: grid; grid-template-rows: 40px 1fr; grid-template-columns: 380px 1fr; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0 12px 0 0; }
+  header .spacer { flex: 1; }
+  aside { display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg2); min-height: 0; }
+  aside .bar { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+  textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; background: var(--bg2); color: var(--text); font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 10px 12px; tab-size: 2; }
+  main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .tabs { display: flex; align-items: center; gap: 2px; padding: 4px 8px 0; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .tab { padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; color: var(--muted); border: 1px solid transparent; border-bottom: 0; }
+  .tab:hover { background: var(--hover); color: var(--text); }
+  .tab.is-active { background: var(--bg); color: var(--text); border-color: var(--border); }
+  .toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; background: var(--bg); }
+  .toolbar[hidden] { display: none; }
+  .toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+  .toolbar label { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+  button, select, input[type=text], input[type=search], input[type=number] { font: inherit; color: var(--text); background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; height: 28px; }
+  button { cursor: pointer; }
+  button:hover { background: var(--hover); border-color: #444; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: var(--accent2); }
+  select { padding-right: 20px; }
+  input[type=range] { width: 90px; accent-color: var(--accent); }
+  .view { flex: 1; min-height: 0; position: relative; display: none; }
+  .view.is-active { display: block; }
+  .stage { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+  .stage > .views { flex: 1; min-height: 0; position: relative; }
+  #mm, #gv, #cv { position: absolute; inset: 0; }
+  .status { display: flex; gap: 14px; padding: 3px 10px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); background: var(--bg2); }
+  .status b { color: var(--text); font-weight: 500; }
+  #log { height: 88px; overflow: auto; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); background: var(--bg2); border-top: 1px solid var(--border); padding: 4px 10px; white-space: pre-wrap; }
+  .menu { position: relative; }
+  .menu-list { display: none; position: absolute; top: 30px; left: 0; z-index: 10; min-width: 190px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+  .menu.is-open .menu-list { display: block; }
+  .menu-list button { display: block; width: 100%; text-align: left; border: 0; background: none; height: 26px; padding: 0 10px; border-radius: 4px; }
+  .menu-list button:hover { background: var(--hover); }
+  input[type=file] { display: none; }
+  .hint { color: var(--muted); font-size: 12px; }
+  @media (max-width: 900px) { body { grid-template-columns: 1fr; grid-template-rows: 40px 220px 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--border); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mind Map engine demo</h1>
+  <span class="hint">markdown → mind map · graph · canvas — all ES modules, no build</span>
+  <span class="spacer"></span>
+  <label>Theme <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select></label>
+  <label><input type="file" id="importFile" accept=".md,.markdown,.txt,.opml,.mm,.xmind,.mind,.mindmeister,.json,.canvas"><button id="importBtn">Import…</button></label>
+  <div class="menu" id="exportMenu"><button id="exportBtn">Export ▾</button>
+    <div class="menu-list">
+      <button data-export="svg">SVG (.svg)</button><button data-export="png">PNG (.png)</button><button data-export="pdf">PDF (print)</button>
+      <button data-export="copy">Copy screenshot</button><button data-export="md">Markdown (.md)</button><button data-export="opml">OPML (.opml)</button><button data-export="freemind">FreeMind (.mm)</button><button data-export="canvasjson">Canvas JSON (.canvas)</button>
+    </div>
+  </div>
+</header>
+<aside>
+  <div class="bar">
+    <button id="loadSample">Sample note</button>
+    <button id="loadBig" class="primary">Load 1500 nodes</button>
+    <button id="loadBigGraph">Graph: 1500 nodes</button>
+    <span class="hint" id="parseInfo"></span>
+  </div>
+  <textarea id="md" spellcheck="false" aria-label="Markdown source"></textarea>
+</aside>
+<main>
+  <div class="tabs" role="tablist">
+    <div class="tab is-active" role="tab" data-tab="mm">Mind map</div>
+    <div class="tab" role="tab" data-tab="gv">Graph</div>
+    <div class="tab" role="tab" data-tab="cv">Canvas</div>
+  </div>
+  <div class="stage">
+    <div class="toolbar" id="tb-mm">
+      <button data-act="fit">Fit</button><button data-act="zoomIn">+</button><button data-act="zoomOut">−</button><button data-act="reset">100%</button>
+      <span class="sep"></span>
+      <button data-act="expandAll">Expand all</button><button data-act="collapseAll">Collapse all</button>
+      <label>Level <input type="number" id="expandLevel" min="0" max="9" value="2" style="width:56px"></label>
+      <span class="sep"></span>
+      <label>Direction <select id="direction"><option>right</option><option>left</option><option>both</option><option>down</option></select></label>
+      <label>Lines <select id="lineStyle"><option>curved</option><option>straight</option><option>angled</option></select></label>
+      <label>Shape <select id="nodeShape"><option>text</option><option>box</option><option>rounded</option><option>pill</option></select></label>
+      <label>Anim <input type="range" id="anim" min="0" max="1000" step="50" value="400"></label>
+      <label>Font <input type="range" id="fontSize" min="10" max="28" value="16"></label>
+      <label><input type="checkbox" id="badges" checked> badges</label>
+      <label><input type="checkbox" id="editable" checked> editable</label>
+      <span class="sep"></span>
+      <input type="search" id="search" placeholder="Search nodes…" style="width:160px"><span class="hint" id="searchInfo"></span>
+    </div>
+    <div class="toolbar" id="tb-gv" hidden>
+      <button data-gact="fit">Fit</button><button data-gact="zoomIn">+</button><button data-gact="zoomOut">−</button>
+      <span class="sep"></span>
+      <label><input type="checkbox" id="gArrows"> arrows</label>
+      <label><input type="checkbox" id="gTags" checked> tags</label>
+      <label><input type="checkbox" id="gUnresolved" checked> unresolved</label>
+      <label><input type="checkbox" id="gAttach" checked> attachments</label>
+      <label><input type="checkbox" id="gLocal"> local graph (depth 2)</label>
+      <span class="sep"></span>
+      <label>Repel <input type="range" id="gRepel" min="1" max="20" value="10"></label>
+      <label>Link dist <input type="range" id="gDist" min="30" max="500" value="250"></label>
+      <label>Center <input type="range" id="gCenter" min="0" max="1" step="0.05" value="0.3"></label>
+      <label>Node size <input type="range" id="gSize" min="0.3" max="3" step="0.1" value="1"></label>
+      <input type="search" id="gSearch" placeholder="Highlight… (tag:#x, path:Projects, file:name)" style="width:220px">
+    </div>
+    <div class="toolbar" id="tb-cv" hidden>
+      <button data-cact="fit">Fit</button><button data-cact="zoomIn">+</button><button data-cact="zoomOut">−</button>
+      <span class="sep"></span>
+      <button data-cact="addText">+ Text card</button><button data-cact="addGroup">+ Group</button><button data-cact="deleteSel">Delete selected</button>
+      <label>Color <select id="cvColor"><option value="">none</option><option value="1">1 red</option><option value="2">2 orange</option><option value="3">3 yellow</option><option value="4">4 green</option><option value="5">5 cyan</option><option value="6">6 purple</option></select></label>
+      <label><input type="checkbox" id="cvSnap"> snap to grid</label>
+      <span class="hint">drag to pan · shift+drag to marquee · double-click empty = new card · drag side handle to connect</span>
+    </div>
+    <div class="views">
+      <div id="mm" class="view is-active" data-view="mm"></div>
+      <div id="gv" class="view" data-view="gv"></div>
+      <div id="cv" class="view" data-view="cv"></div>
+    </div>
+    <div class="status">
+      <span>nodes <b id="sNodes">0</b></span><span>visible <b id="sVisible">0</b></span><span>rendered <b id="sRendered">0</b></span>
+      <span>layout <b id="sLayout">0</b> ms</span><span>render <b id="sRender">0</b> ms</span><span>zoom <b id="sZoom">100%</b></span>
+      <span id="sExtra"></span>
+    </div>
+    <div id="log" aria-live="polite"></div>
+  </div>
+</main>
+
+<script type="module">
+import { parseMarkdown, setNodeText, insertChild, insertSibling, deleteNode, moveNode, toggleCheck, findNodeById } from '../src/core/markdown.js';
+import { MindMapView } from '../src/mindmap/renderer.js';
+import { GraphView } from '../src/mindmap/graph.js';
+import { CanvasView } from '../src/mindmap/canvas.js';
+import { exportSVG, exportPNG, exportPDF, exportMarkdown, exportOPML, exportFreeMind, copyScreenshot, download } from '../src/core/exporters.js';
+import { importFile } from '../src/core/importers.js';
+import { generateBigMap, generateGraph, sampleCanvas } from './bigmap.js';
+
+const $ = s => document.querySelector(s);
+const log = (...a) => { const el = $('#log'); el.textContent = `${new Date().toLocaleTimeString()} ${a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ')}\n` + el.textContent.slice(0, 6000); };
+
+const SAMPLE = `---
+title: Product launch
+tags: [planning, demo]
+---
+# Overview
+Kick-off notes for the **Q4 launch** — see [[Roadmap]] and [[Design system|the design system]]. #planning
+
+## Goals
+- Ship the mind map plugin clone #milestone
+- Reach 1k ==weekly active== users
+- [ ] Write the launch post ![[hero.png]]
+- [x] Pick a release date
+
+## Engineering
+- Parser with stable ids and line ranges
+  - Headings, nested lists, checkboxes
+  - Fenced code and tables become single nodes
+- Renderer
+  - Tidy layout in O(n) and \`virtualize\` culling for 1000+ nodes
+  - Animated transitions (respects reduced motion)
+  - Keyboard: arrows, Enter, Tab, Delete, F2, Space
+- Graph view with force simulation [[Graph]]
+- Canvas per the JSON Canvas spec <https://jsoncanvas.org>
+
+\`\`\`js
+const view = new MindMapView(el, { direction: 'right' });
+view.setData(parseMarkdown(markdown));
+\`\`\`
+
+## Marketing {color:#e0ac00}
+1. Landing page copy #docs
+2. Demo video
+3. Launch tweet thread [link](https://x.com)
+
+| Channel | Owner |
+|---|---|
+| Blog | Sam |
+| Newsletter | Ada |
+
+## Risks <!-- color: #e93147 -->
+Scope creep — keep the editor read-only for v1.
+`;
+
+// ───────────── views ─────────────
+const mm = new MindMapView($('#mm'), { animationDuration: 400, defaultColor: '#8a8a8a', virtualize: true });
+const gv = new GraphView($('#gv'), {});
+const cv = new CanvasView($('#cv'), {});
+window.mm = mm; window.gv = gv; window.cv = cv;
+
+let content = '';
+let tree = null;
+let rootText = 'Untitled';
+const ta = $('#md');
+
+function setContent(text, { keepState = true, name } = {}) {
+  content = text;
+  if (name) rootText = name;
+  if (ta.value !== text) ta.value = text;
+  const t0 = performance.now();
+  tree = parseMarkdown(content, { rootText });
+  const parseMs = performance.now() - t0;
+  const alpha = tree.children[0];
+  if (alpha) { if (alpha.children[0]) alpha.children[0].unread = true; }
+  mm.setData(tree, { keepState });
+  $('#parseInfo').textContent = `parsed in ${parseMs.toFixed(1)} ms`;
+}
+const applyEdit = (label, next) => { if (next !== content) { log(label); setContent(next, { keepState: true }); } };
+
+let typing = 0;
+ta.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(() => setContent(ta.value, { keepState: true }), 120); });
+
+// mind map events → text edit operations (round trip through markdown, like the real app)
+mm.on('node:edit', ({ node, text }) => applyEdit(`edit ${node.id} → ${JSON.stringify(text)}`, setNodeText(content, node, text)));
+mm.on('node:add-child', ({ node }) => { const next = insertChild(content, node, 'New node'); applyEdit('add child', next); selectNewNode(next, node.subtreeEndLine + 1, true); });
+mm.on('node:add-sibling', ({ node }) => { const next = insertSibling(content, node, 'New node'); applyEdit('add sibling', next); selectNewNode(next, node.subtreeEndLine + 1); });
+mm.on('node:delete', ({ node }) => applyEdit(`delete ${node.text}`, deleteNode(content, node)));
+mm.on('node:move', ({ node, newParent, newParentId }) => applyEdit(`move "${node.text}" → "${(newParent || findNodeById(tree, newParentId)).text}"`, moveNode(content, node, newParent || findNodeById(tree, newParentId))));
+mm.on('node:check', ({ node }) => applyEdit('toggle check', toggleCheck(content, node)));
+mm.on('node:toggle', p => log('toggle', p.id, p.collapsed ? 'collapsed' : 'expanded'));
+mm.on('node:click', p => log('click', p.node.text));
+mm.on('node:contextmenu', p => log('contextmenu', p.node.text, p.x, p.y));
+mm.on('link:click', p => log('link:click', p.type, p.target));
+mm.on('selection:change', p => { $('#sExtra').textContent = p.id ? `selected: ${p.node.text.slice(0, 40)}` : ''; });
+mm.on('view:transform', t => { $('#sZoom').textContent = Math.round(t.k * 100) + '%'; });
+mm.on('render', ({ stats }) => { $('#sNodes').textContent = stats.nodes; $('#sVisible').textContent = stats.visible; $('#sRendered').textContent = stats.rendered; $('#sLayout').textContent = stats.layoutMs.toFixed(1); $('#sRender').textContent = stats.renderMs.toFixed(1); });
+function selectNewNode(next, line, edit) {
+  requestAnimationFrame(() => {
+    const lines = next.split('\n');
+    let l = line; while (l < lines.length && !lines[l].trim()) l++;
+    const n = [...mm.index.values()].find(x => x.line === l);
+    if (n) { mm.select(n.id); mm.ensureVisible(n.id); if (edit) mm.startEdit(n.id); else mm.startEdit(n.id); }
+  });
+}
+
+// ───────────── mind map toolbar ─────────────
+$('#tb-mm').addEventListener('click', e => {
+  const act = e.target.dataset.act; if (!act) return;
+  ({ fit: () => mm.fit(), zoomIn: () => mm.zoomIn(), zoomOut: () => mm.zoomOut(), reset: () => mm.resetZoom(),
+    expandAll: () => mm.expandAll(), collapseAll: () => mm.collapseAll() })[act]();
+});
+$('#expandLevel').addEventListener('change', e => mm.expandToLevel(+e.target.value));
+for (const id of ['direction', 'lineStyle', 'nodeShape']) $('#' + id).addEventListener('change', e => mm.setOptions({ [id]: e.target.value }));
+$('#anim').addEventListener('input', e => mm.setOptions({ animationDuration: +e.target.value }));
+$('#fontSize').addEventListener('input', e => mm.setOptions({ fontSize: +e.target.value }));
+$('#badges').addEventListener('change', e => mm.setOptions({ showBadges: e.target.checked }));
+$('#editable').addEventListener('change', e => mm.setOptions({ editable: e.target.checked }));
+$('#search').addEventListener('input', e => { const n = mm.highlight(e.target.value); $('#searchInfo').textContent = e.target.value ? `${n} match${n === 1 ? '' : 'es'}` : ''; });
+$('#theme').addEventListener('change', e => { const theme = e.target.value; mm.setOptions({ theme }); gv.setOptions({ theme }); cv.setOptions({ theme }); document.body.style.background = theme === 'light' ? '#fff' : ''; });
+
+// ───────────── graph ─────────────
+let graphData = generateGraph(220, 5);
+function applyGraph() {
+  const local = $('#gLocal').checked;
+  const focus = local ? graphData.nodes.find(n => n.type === 'note' && n.linkCount > 4)?.id : null;
+  gv.setData(graphData, focus ? { focus, depth: 2 } : {});
+  log('graph nodes', gv.getStats().nodes, 'links', gv.getStats().links);
+}
+applyGraph();
+gv.setOptions({ colorGroups: [{ query: 'tag:#urgent', color: '#e93147' }, { query: 'path:Projects', color: '#8a5cf5' }, { query: 'file:image', color: '#e0ac00' }] });
+gv.on('node:click', p => log('graph click', p.node.name, p.node.type));
+gv.on('node:dblclick', p => log('graph dblclick', p.node.name));
+gv.on('node:contextmenu', p => log('graph contextmenu', p.node ? p.node.name : '(background)'));
+gv.on('node:hover', p => { if (p.id) $('#sExtra').textContent = `hover: ${p.node.name}`; });
+$('#tb-gv').addEventListener('click', e => { const a = e.target.dataset.gact; if (a) gv[a](); });
+$('#gArrows').addEventListener('change', e => gv.setOptions({ showArrows: e.target.checked }));
+$('#gTags').addEventListener('change', e => gv.setOptions({ showTags: e.target.checked }));
+$('#gUnresolved').addEventListener('change', e => gv.setOptions({ showUnresolved: e.target.checked }));
+$('#gAttach').addEventListener('change', e => gv.setOptions({ showAttachments: e.target.checked }));
+$('#gLocal').addEventListener('change', applyGraph);
+$('#gRepel').addEventListener('input', e => gv.setOptions({ repelForce: +e.target.value }));
+$('#gDist').addEventListener('input', e => gv.setOptions({ linkDistance: +e.target.value }));
+$('#gCenter').addEventListener('input', e => gv.setOptions({ centerForce: +e.target.value }));
+$('#gSize').addEventListener('input', e => gv.setOptions({ nodeSize: +e.target.value }));
+$('#gSearch').addEventListener('input', e => { const n = gv.highlight(e.target.value); $('#sExtra').textContent = e.target.value ? `${n} graph matches` : ''; });
+$('#loadBigGraph').addEventListener('click', () => { graphData = generateGraph(1500, 3); applyGraph(); showTab('gv'); });
+
+// ───────────── canvas ─────────────
+cv.setData(sampleCanvas());
+cv.on('change', ({ data }) => log('canvas change', `${data.nodes.length} nodes, ${data.edges.length} edges`));
+cv.on('node:open', ({ node }) => log('canvas open', node.type, node.file || node.url || ''));
+cv.on('selection:change', ({ ids }) => { $('#sExtra').textContent = ids.length ? `canvas selection: ${ids.length}` : ''; });
+cv.on('node:contextmenu', p => log('canvas contextmenu', p.node ? p.node.id : p.edge ? 'edge ' + p.edge.id : '(background)'));
+$('#tb-cv').addEventListener('click', e => {
+  const a = e.target.dataset.cact; if (!a) return;
+  if (a === 'addText') cv.select(cv.addNode({ type: 'text', text: '# New card\nDouble-click to edit' }));
+  else if (a === 'addGroup') { const c = cv._viewCenterWorld(); cv.select(cv.addNode({ type: 'group', label: 'New group', x: c.x - 200, y: c.y - 120, width: 400, height: 240 })); }
+  else if (a === 'deleteSel') cv.remove(cv.getSelection());
+  else cv[a]();
+});
+$('#cvColor').addEventListener('change', e => { for (const id of cv.getSelection()) { if (cv.getNode(id)) cv.updateNode(id, { color: e.target.value || undefined }); else if (cv.getEdge(id)) cv.updateEdge(id, { color: e.target.value || undefined }); } });
+$('#cvSnap').addEventListener('change', e => cv.setOptions({ snapToGrid: e.target.checked }));
+
+// ───────────── tabs ─────────────
+let active = 'mm';
+function showTab(name) {
+  active = name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.tab === name));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('is-active', v.dataset.view === name));
+  for (const id of ['mm', 'gv', 'cv']) $('#tb-' + id).hidden = id !== name;
+  if (name === 'gv') { gv.resume(); gv._resize(); } else gv.pause();
+  if (name === 'cv') cv.fit(60, false);
+}
+document.querySelector('.tabs').addEventListener('click', e => { const t = e.target.closest('.tab'); if (t) showTab(t.dataset.tab); });
+
+// ───────────── load / import / export ─────────────
+$('#loadSample').addEventListener('click', () => { setContent(SAMPLE, { keepState: false, name: 'Product launch' }); mm.fit(); });
+$('#loadBig').addEventListener('click', () => {
+  const t0 = performance.now();
+  const md = generateBigMap(1500);
+  setContent(md, { keepState: false, name: 'Big map' });
+  mm.expandAll();
+  mm.setTransform({ x: 40, y: 40, k: 0.6 });
+  log(`1500-node map loaded in ${(performance.now() - t0).toFixed(1)} ms total (parse + layout + render)`, mm.getStats());
+  showTab('mm');
+});
+$('#importBtn').addEventListener('click', () => $('#importFile').click());
+$('#importFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const res = await importFile(f);
+    log('imported', f.name, res.canvas ? '(canvas)' : '', `${res.markdown.length} chars`);
+    if (res.canvas) { cv.setData(res.canvas); showTab('cv'); }
+    setContent(res.markdown, { keepState: false, name: res.name });
+    if (!res.canvas) { showTab('mm'); mm.fit(); }
+  } catch (err) { log('import failed:', err.message); }
+  e.target.value = '';
+});
+const menu = $('#exportMenu');
+$('#exportBtn').addEventListener('click', () => menu.classList.toggle('is-open'));
+document.addEventListener('click', e => { if (!menu.contains(e.target)) menu.classList.remove('is-open'); });
+menu.addEventListener('click', async e => {
+  const kind = e.target.dataset.export; if (!kind) return;
+  menu.classList.remove('is-open');
+  const view = active === 'gv' ? gv : active === 'cv' ? cv : mm;
+  const base = rootText.replace(/[^\w-]+/g, '_') || 'mindmap';
+  try {
+    if (kind === 'svg') download(await exportSVG(view, {}), base + '.svg', 'image/svg+xml');
+    else if (kind === 'png') download(await exportPNG(view, { scale: 2 }), base + '.png', 'image/png');
+    else if (kind === 'pdf') await exportPDF(view, { title: rootText });
+    else if (kind === 'copy') log('screenshot', await copyScreenshot(view, { scale: 2 }));
+    else if (kind === 'md') download(exportMarkdown(tree), base + '.md', 'text/markdown');
+    else if (kind === 'opml') download(exportOPML(tree), base + '.opml', 'text/xml');
+    else if (kind === 'freemind') download(exportFreeMind(tree), base + '.mm', 'text/xml');
+    else if (kind === 'canvasjson') download(JSON.stringify(cv.getData(), null, 2), base + '.canvas', 'application/json');
+    log('export', kind, 'ok');
+  } catch (err) { log('export failed:', err.message); console.error(err); }
+});
+
+setContent(SAMPLE, { keepState: false, name: 'Product launch' });
+log('ready — keyboard: arrows navigate, Enter sibling, Tab child, Delete, F2 edit, Space toggle, Esc');
+</script>
+</body>
+</html>

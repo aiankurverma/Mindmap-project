@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Engine tests</title>
+<style>
+  body { margin: 0; padding: 16px 20px; background: #202020; color: #dadada; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  h1 { font-size: 16px; margin: 0 0 10px; }
+  #summary { font-weight: 600; padding: 8px 12px; border-radius: 6px; background: #161616; border: 1px solid #333; margin-bottom: 12px; }
+  #summary.ok { border-color: #08b94e; } #summary.bad { border-color: #e93147; }
+  .t { padding: 2px 8px; border-radius: 4px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .t.pass::before { content: "PASS "; color: #08b94e; } .t.fail::before { content: "FAIL "; color: #e93147; }
+  .t.fail { background: rgba(233,49,71,.12); }
+  .t .err { color: #f38ba8; margin-left: 8px; }
+  h2 { font-size: 13px; color: #999; margin: 14px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+  #stage { position: absolute; left: -10000px; top: 0; width: 900px; height: 600px; }
+  #stage > div { width: 900px; height: 600px; }
+</style>
+</head>
+<body>
+<h1>Mind Map engine — in-browser tests</h1>
+<div id="summary">Running…</div>
+<div id="out"></div>
+<div id="stage"><div id="mm"></div><div id="gv"></div><div id="cv"></div></div>
+<script type="module">
+import { parseMarkdown, parseFrontmatter, renderInline, extractLinks, treeToMarkdown, setNodeText, insertChild, insertSibling, deleteNode, moveNode, toggleCheck, findNodeById, findNodeAtLine, flattenTree } from '../src/core/markdown.js';
+import { layoutTree } from '../src/mindmap/layout.js';
+import { MindMapView } from '../src/mindmap/renderer.js';
+import { GraphView } from '../src/mindmap/graph.js';
+import { CanvasView } from '../src/mindmap/canvas.js';
+import { ForceSimulation } from '../src/mindmap/graph-sim.js';
+import { exportSVG, exportPNG, exportMarkdown, exportOPML, exportFreeMind } from '../src/core/exporters.js';
+import { readZip, opmlToMarkdown, freemindToMarkdown, xmindToMarkdown, mindmeisterToMarkdown, importFile, outlineTextToMarkdown, canvasToMarkdown } from '../src/core/importers.js';
+import { generateBigMap, generateGraph, sampleCanvas } from '../dev/bigmap.js';
+
+const out = document.getElementById('out');
+const results = { pass: 0, fail: 0, failures: [] };
+let section = null;
+const group = name => { section = document.createElement('h2'); section.textContent = name; out.appendChild(section); };
+async function test(name, fn) {
+  const el = document.createElement('div'); el.className = 't'; el.textContent = name; out.appendChild(el);
+  try { await fn(); el.classList.add('pass'); results.pass++; }
+  catch (err) { el.classList.add('fail'); const e = document.createElement('span'); e.className = 'err'; e.textContent = err && err.message || String(err); el.appendChild(e); results.fail++; results.failures.push(name + ': ' + (err && err.message)); console.error(name, err); }
+}
+const assert = (c, m = 'assertion failed') => { if (!c) throw new Error(m); };
+const eq = (a, b, m) => { if (a !== b) throw new Error(`${m || 'not equal'}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`); };
+const deepEq = (a, b, m) => eq(JSON.stringify(a), JSON.stringify(b), m);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const structure = t => flattenTree(t).map(n => [n.type, n.text, n.depth]);
+
+const MD = `---
+title: Demo
+tags: [a, b]
+---
+# Heading 1
+Intro paragraph with [[Note|alias]] and #tag1.
+
+## Sub A
+- item 1 **bold**
+  - [ ] todo child
+  - [x] done child
+- item 2 \`code\`
+1. ordered
+2. ordered two
+
+\`\`\`js
+console.log(1)
+\`\`\`
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+## Sub B {color:#ff0000}
+Para B
+`;
+
+// ───────────── parser ─────────────
+group('markdown parser');
+await test('frontmatter parsed and stripped', () => {
+  const fm = parseFrontmatter(MD);
+  eq(fm.data.title, 'Demo'); deepEq(fm.data.tags, ['a', 'b']); assert(fm.body.startsWith('# Heading 1'));
+});
+await test('headings nest by level, root from frontmatter title', () => {
+  const t = parseMarkdown(MD);
+  eq(t.type, 'root'); eq(t.text, 'Demo'); eq(t.children.length, 1);
+  const h1 = t.children[0]; eq(h1.type, 'heading'); eq(h1.level, 1); eq(h1.depth, 1);
+  eq(h1.children.map(c => c.type).join(','), 'paragraph,heading,heading');
+});
+await test('lists nest by indent; ordered and checkboxes', () => {
+  const subA = parseMarkdown(MD).children[0].children[1];
+  eq(subA.children[0].type, 'list'); eq(subA.children[0].children.length, 2);
+  eq(subA.children[0].children[0].checked, false); eq(subA.children[0].children[1].checked, true);
+  eq(subA.children[0].children[0].text, 'todo child');
+  eq(subA.children[0].children[0].badges[0], 'todo'); eq(subA.children[0].children[1].badges[0], 'done');
+  eq(subA.children[2].marker, '1.'); eq(subA.children[2].text, 'ordered');
+  eq(subA.children[0].children[0].level, 2);
+});
+await test('fenced code and tables become single nodes with line ranges', () => {
+  const subA = parseMarkdown(MD).children[0].children[1];
+  const code = subA.children[4], table = subA.children[5];
+  eq(code.type, 'code'); eq(code.line, 15); eq(code.endLine, 17); eq(code.body, 'console.log(1)'); eq(code.info, 'js');
+  assert(code.html.startsWith('<pre'), 'code html');
+  eq(table.type, 'table'); eq(table.line, 19); eq(table.endLine, 21); assert(table.html.includes('<table'), 'table html');
+  eq(subA.subtreeEndLine, 21); eq(subA.line, 7);
+});
+await test('color markers ({color:} and <!-- color -->)', () => {
+  const t = parseMarkdown(MD);
+  const subB = t.children[0].children[2];
+  eq(subB.text, 'Sub B'); eq(subB.color, '#ff0000');
+  const t2 = parseMarkdown('# A\n<!-- color: #00ff00 -->\n- item\n', { rootText: 'r' });
+  eq(t2.children[0].children[0].color, '#00ff00');
+});
+await test('ids are stable when text changes (ancestry index hash)', () => {
+  const a = parseMarkdown(MD), b = parseMarkdown(MD.replace('item 1 **bold**', 'renamed'));
+  deepEq(flattenTree(a).map(n => n.id), flattenTree(b).map(n => n.id));
+  assert(new Set(flattenTree(a).map(n => n.id)).size === flattenTree(a).length, 'ids unique');
+});
+await test('single H1 promoted to root when no rootText; not when rootText given', () => {
+  const md = '# Only\n- a\n- b\n';
+  const p = parseMarkdown(md); eq(p.type, 'root'); eq(p.text, 'Only'); eq(p.promoted, true); eq(p.children.length, 2); eq(p.line, 0);
+  const q = parseMarkdown(md, { rootText: 'Note' }); eq(q.text, 'Note'); eq(q.children[0].text, 'Only');
+});
+await test('paragraph lazy continuation and maxDepth', () => {
+  const t = parseMarkdown('# H\nline one\nline two\n\n- a\n  - b\n    - c\n', { rootText: 'r' });
+  const p = t.children[0].children[0]; eq(p.type, 'paragraph'); eq(p.text, 'line one line two'); eq(p.endLine, 2);
+  const shallow = parseMarkdown('# H\n- a\n  - b\n    - c\n', { rootText: 'r', maxDepth: 2 });
+  eq(flattenTree(shallow).length, 3);
+});
+await test('tags / links / badges on nodes', () => {
+  const t = parseMarkdown('# H\n- has [[Link|x]] and #t1 and ![[img.png]] and ![[embed]] `c`\n', { rootText: 'r' });
+  const n = t.children[0].children[0];
+  deepEq(n.tags, ['#t1']); deepEq(n.links, ['Link']);
+  for (const b of ['link', 'image', 'embed', 'code']) assert(n.badges.includes(b), 'badge ' + b);
+});
+
+// ───────────── inline renderer ─────────────
+group('inline renderer');
+await test('emphasis, code, strike, highlight', () => {
+  const h = renderInline('**b** *i* ~~s~~ ==h== `c`');
+  for (const x of ['<strong>b</strong>', '<em>i</em>', '<del>s</del>', '<mark>h</mark>', '<code>c</code>']) assert(h.includes(x), x);
+});
+await test('wikilinks, aliases, embeds, tags, md links, autolinks', () => {
+  const h = renderInline('[[N|x]] [[Other#Head]] ![[i.png]] #tag/sub [l](https://x.y) <https://a.b> https://ex.com/p?a=1&b=2.');
+  assert(h.includes('class="internal-link" href="#" data-href="N" data-target="N">x</a>'), 'alias link');
+  assert(h.includes('data-href="Other#Head" data-target="Other"'), 'heading link base');
+  assert(h.includes('class="mm-embed mm-embed-image"'), 'image embed');
+  assert(h.includes('class="tag" href="#" data-tag="#tag/sub">#tag/sub</a>'), 'tag');
+  assert(h.includes('class="external-link" href="https://x.y"'), 'md link');
+  assert(h.includes('href="https://a.b"'), 'autolink');
+  assert(h.includes('href="https://ex.com/p?a=1&amp;b=2"'), 'bare url ' + h);
+});
+await test('sanitization: html escaped, javascript: urls neutralized', () => {
+  const h = renderInline('<script>alert(1)<\/script> [x](javascript:alert(1)) <img src=x onerror=alert(1)>');
+  assert(!/<script/.test(h) && h.includes('&lt;script&gt;'), 'script escaped');
+  assert(!h.includes('javascript:'), 'js url removed');
+  assert(!/<img/.test(h), 'raw img escaped');
+});
+await test('highlight=false returns escaped plain text', () => eq(renderInline('**b** <i>', { highlight: false }), '**b** &lt;i&gt;'));
+
+// ───────────── extractLinks ─────────────
+group('extractLinks');
+await test('links, embeds, tags, aliases, frontmatter tags, code ignored', () => {
+  const r = extractLinks(MD + '\n![[pic.png]] [[Note#Head]] `[[not]]` #tag2\n```\n[[nope]] #no\n```\n');
+  deepEq(r.links, ['Note']); deepEq(r.embeds, ['pic.png']); deepEq(r.tags, ['#tag1', '#tag2', '#a', '#b']);
+  eq(r.aliases.alias, 'Note');
+});
+
+// ───────────── serializer round trip ─────────────
+group('treeToMarkdown');
+await test('parse → serialize → parse preserves structure', () => {
+  const t = parseMarkdown(MD);
+  const md2 = treeToMarkdown(t);
+  const t2 = parseMarkdown(md2, { rootText: 'Demo' });
+  deepEq(structure(t2), structure(t));
+  assert(md2.includes('## Sub B {color:#ff0000}'), 'color marker preserved');
+  assert(md2.includes('1. ordered'), 'ordered marker preserved');
+});
+await test('big map round trip (1500 nodes)', () => {
+  const t = parseMarkdown(generateBigMap(1500));
+  eq(flattenTree(t).length, 1500);
+  const t2 = parseMarkdown(treeToMarkdown(t), { rootText: t.text });
+  deepEq(structure(t2), structure(t));
+});
+
+// ───────────── edit operations ─────────────
+group('edit operations');
+const T = parseMarkdown(MD);
+const H1 = T.children[0], SUBA = H1.children[1], SUBB = H1.children[2], ITEM1 = SUBA.children[0], ITEM2 = SUBA.children[1];
+await test('setNodeText heading / list (keeps checkbox) / paragraph', () => {
+  assert(setNodeText(MD, SUBA, 'Renamed').split('\n')[7] === '## Renamed', 'heading');
+  assert(setNodeText(MD, ITEM1.children[0], 'todo renamed').split('\n')[9] === '  - [ ] todo renamed', 'list keeps checkbox');
+  assert(setNodeText(MD, SUBB.children[0], 'New para').split('\n')[24] === 'New para', 'paragraph');
+  assert(setNodeText(MD, SUBB, 'B2').split('\n')[23] === '## B2 {color:#ff0000}', 'color marker kept');
+  assert(setNodeText(MD, T, 'New title').split('\n')[1] === 'title: New title', 'synthetic root → frontmatter title');
+});
+await test('insertChild: heading → sub-heading, list → indented item, level 6 → list, root → H1', () => {
+  const a = insertChild(MD, SUBA, 'NEW'); assert(a.includes('| 1 | 2 |\n\n### NEW\n\n## Sub B'), 'sub-heading after subtree\n' + a);
+  const b = insertChild(MD, ITEM1, 'KID').split('\n'); eq(b[11], '  - KID');
+  const c = insertChild(MD, ITEM2, 'KID2').split('\n'); eq(c[12], '  - KID2');
+  const six = parseMarkdown('###### Six\n', { rootText: 'r' }).children[0];
+  eq(insertChild('###### Six\n', six, 'x').split('\n')[1], '- x');
+  const rootChild = insertChild(MD, T, 'Top'); assert(rootChild.trimEnd().endsWith('\n# Top'), 'root child heading');
+  const t2 = parseMarkdown('- a\n- b\n', { rootText: 'r' }); eq(insertChild('- a\n- b\n', t2, 'c').split('\n')[2], '- c');
+});
+await test('insertSibling: heading / ordered list increments marker', () => {
+  const a = insertSibling(MD, SUBA, 'SIB').split('\n'); eq(a[22], ''); eq(a[23], '## SIB'); eq(a[25], '## Sub B {color:#ff0000}');
+  const ordered = SUBA.children[2]; const b = insertSibling(MD, ordered, 'three').split('\n'); eq(b[13], '2. three');
+  const c = insertSibling(MD, ITEM1, 'after item 1').split('\n'); eq(c[11], '- after item 1'); eq(c[12], '- item 2 `code`');
+});
+await test('deleteNode removes subtree and collapses blank lines', () => {
+  const d = deleteNode(MD, SUBA);
+  assert(!d.includes('Sub A') && !d.includes('console.log') && d.includes('## Sub B'), 'subtree gone');
+  assert(!/\n\n\n/.test(d), 'no triple blank');
+  eq(deleteNode(MD, T), MD, 'root delete is no-op');
+  const d2 = deleteNode(MD, ITEM1); assert(!d2.includes('todo child') && d2.includes('- item 2'), 'list subtree');
+});
+await test('moveNode: list → heading (append), heading → list item (converted), reorder by index, guards', () => {
+  const m1 = parseMarkdown(moveNode(MD, ITEM1, SUBB), { rootText: 'Demo' });
+  const subB = m1.children[0].children[2]; eq(subB.text, 'Sub B');
+  eq(subB.children[1].text, 'item 1 **bold**'); eq(subB.children[1].children.length, 2); eq(subB.children[1].children[0].checked, false);
+  eq(m1.children[0].children[1].children[0].text, 'item 2 `code`');
+  const m2md = moveNode(MD, SUBB, ITEM2); const m2 = parseMarkdown(m2md, { rootText: 'Demo' });
+  const item2 = m2.children[0].children[1].children[1]; eq(item2.text, 'item 2 `code`');
+  eq(item2.children[0].text, 'Sub B'); eq(item2.children[0].type, 'list'); eq(item2.children[0].color, '#ff0000'); eq(item2.children[0].children[0].text, 'Para B');
+  const m3 = parseMarkdown(moveNode(MD, ITEM2, SUBA, 0), { rootText: 'Demo' });
+  eq(m3.children[0].children[1].children[0].text, 'item 2 `code`'); eq(m3.children[0].children[1].children[1].text, 'item 1 **bold**');
+  eq(moveNode(MD, SUBA, ITEM1), MD, 'cannot move into own descendant');
+  eq(moveNode(MD, T, SUBA), MD, 'cannot move root');
+  const m4 = parseMarkdown(moveNode(MD, SUBB, T), { rootText: 'Demo' });
+  eq(m4.children[1].text, 'Sub B'); eq(m4.children[1].level, 1, 'heading level fixed up to 1');
+  const m5 = parseMarkdown(moveNode(MD, ITEM1, SUBB.children[0]), { rootText: 'Demo' });
+  eq(m5.children[0].children[2].children[1].text, 'item 1 **bold**', 'leaf target → sibling after leaf');
+});
+await test('toggleCheck cycles [ ] → [x] → [ ] and adds a box to plain items', () => {
+  const a = toggleCheck(MD, ITEM1.children[0]).split('\n')[9]; eq(a, '  - [x] todo child');
+  const b = toggleCheck(MD, ITEM1.children[1]).split('\n')[10]; eq(b, '  - [ ] done child');
+  const c = toggleCheck(MD, ITEM1).split('\n')[8]; eq(c, '- [ ] item 1 **bold**');
+  eq(toggleCheck(MD, SUBA), MD, 'heading no-op');
+});
+await test('findNodeById / findNodeAtLine / flattenTree', () => {
+  eq(findNodeById(T, ITEM2.id), ITEM2); eq(findNodeById(T, 'nope'), null);
+  eq(findNodeAtLine(T, 10).text, 'done child'); eq(findNodeAtLine(T, 16).type, 'code'); eq(findNodeAtLine(T, 7).text, 'Sub A'); eq(findNodeAtLine(T, 2), T);
+  eq(flattenTree(T).length, 14);
+});
+
+// ───────────── layout ─────────────
+group('layout');
+const overlaps = nodes => {
+  let count = 0;
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    const a = nodes[i], b = nodes[j];
+    if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) count++;
+  }
+  return count;
+};
+const fakeSize = n => ({ w: 40 + (n.text.length % 7) * 12, h: 18 + (n.depth % 3) * 6 });
+for (const direction of ['right', 'left', 'both', 'down']) {
+  await test(`no overlapping nodes (direction=${direction}, 400 nodes)`, () => {
+    const t = parseMarkdown(generateBigMap(400, 11));
+    const res = layoutTree(t, { direction, spacingVertical: 5, spacingHorizontal: 80, size: fakeSize, isExpanded: () => true });
+    eq(res.nodes.length, 400); eq(overlaps(res.nodes), 0); assert(res.width > 0 && res.height > 0, 'bounds');
+    if (direction === 'both') assert(res.nodes.some(n => n.side === 'left') && res.nodes.some(n => n.side === 'right'), 'both sides used');
+    if (direction === 'down') assert(res.nodes.every(n => n.side === 'down'), 'down side');
+  });
+}
+await test('collapsed subtrees are not laid out', () => {
+  const t = parseMarkdown(MD);
+  const res = layoutTree(t, { direction: 'right', spacingVertical: 5, spacingHorizontal: 80, size: fakeSize, isExpanded: n => n.text !== 'Sub A' });
+  eq(res.nodes.length, 14 - 8); assert(res.nodes.find(n => n.text === 'Sub A').expanded === false);
+});
+await test('layout is O(n)-ish: 1500 nodes under 50 ms', () => {
+  const t = parseMarkdown(generateBigMap(1500));
+  const t0 = performance.now();
+  layoutTree(t, { direction: 'right', spacingVertical: 5, spacingHorizontal: 80, size: fakeSize, isExpanded: () => true });
+  const ms = performance.now() - t0; assert(ms < 50, `took ${ms.toFixed(1)} ms`);
+});
+
+// ───────────── MindMapView ─────────────
+group('MindMapView');
+const mmEl = document.getElementById('mm');
+const mm = new MindMapView(mmEl, { animationDuration: 0, virtualize: true });
+const events = [];
+for (const ev of ['node:toggle', 'node:edit', 'node:add-child', 'node:add-sibling', 'node:delete', 'node:move', 'node:check', 'link:click', 'selection:change', 'node:contextmenu']) mm.on(ev, p => events.push([ev, p]));
+await test('setData renders nodes, links, ARIA tree', () => {
+  mm.setData(parseMarkdown(MD));
+  const s = mm.getStats(); eq(s.nodes, 14); eq(s.visible, 14); eq(s.rendered, 14);
+  eq(mmEl.querySelectorAll('.mm-node').length, 14); eq(mmEl.querySelectorAll('.mm-link').length, 13);
+  eq(mm.getSVG().getAttribute('role'), 'tree'); eq(mmEl.querySelector('.mm-node').getAttribute('role'), 'treeitem');
+  assert(mmEl.querySelector('.mm-node.has-children .mm-toggle'), 'toggle circle');
+  assert(mmEl.querySelector('.mm-node.is-todo .mm-check'), 'checkbox badge'); assert(mmEl.querySelector('a.tag'), 'tag pill');
+  assert(mmEl.querySelector('.mm-node.is-code .mm-pre'), 'code node'); assert(mmEl.querySelector('.mm-node.is-table table'), 'table node');
+});
+await test('depth colors + thickness + freeze level + colorByTag + data-type', () => {
+  const t = parseMarkdown(MD); mm.setData(t);
+  const link = id => mmEl.querySelector(`.mm-link[data-id="${id}"]`);
+  eq(link(H1.id) && link(t.children[0].id).getAttribute('stroke'), '#fed766'); eq(link(t.children[0].id).getAttribute('stroke-width'), '10');
+  eq(link(t.children[0].children[1].id).getAttribute('stroke'), '#2ab7ca'); eq(link(t.children[0].children[1].children[0].id).getAttribute('stroke'), '#fe4a49');
+  eq(link(t.children[0].children[1].children[0].children[0].id).getAttribute('stroke'), '#000');
+  mm.setOptions({ colorFreezeLevel: 2 }); eq(link(t.children[0].children[1].children[0].children[0].id).getAttribute('stroke'), '#2ab7ca');
+  mm.setOptions({ colorFreezeLevel: 0, colorByTag: { '#tag1': '#123456' } });
+  eq(link(t.children[0].children[0].id).getAttribute('stroke'), '#123456'); eq(link(t.children[0].children[0].id).getAttribute('data-type'), 'tag');
+  eq(link(t.children[0].children[2].id).getAttribute('stroke'), '#ff0000', 'explicit node color');
+  mm.setOptions({ colorByTag: {} });
+});
+await test('toggleNode / expandAll / collapseAll / expandToLevel / initialExpandLevel / keepState', () => {
+  mm.toggleNode(SUBA.id); assert(mm.isCollapsed(SUBA.id)); eq(mm.getStats().visible, 6); eq(events.filter(e => e[0] === 'node:toggle').length, 1);
+  assert(mmEl.querySelector(`.mm-node[data-id="${SUBA.id}"]`).classList.contains('is-collapsed'));
+  mm.setData(parseMarkdown(MD), { keepState: true }); assert(mm.isCollapsed(SUBA.id), 'keepState keeps collapse'); eq(mm.getStats().visible, 6);
+  mm.expandAll(); eq(mm.getStats().visible, 14);
+  mm.collapseAll(); eq(mm.getStats().visible, 2);
+  mm.expandToLevel(2); eq(mm.getStats().visible, 5);
+  mm.setOptions({ initialExpandLevel: 1 }); mm.setData(parseMarkdown(MD)); eq(mm.getStats().visible, 2);
+  mm.setOptions({ initialExpandLevel: -1 }); mm.setData(parseMarkdown(MD)); eq(mm.getStats().visible, 14);
+});
+await test('highlight returns match count, dims others, reveals collapsed matches', () => {
+  mm.collapseAll();
+  eq(mm.highlight('child'), 2);
+  eq(mmEl.querySelectorAll('.mm-node.is-match').length, 2); assert(mmEl.querySelectorAll('.mm-node.is-dimmed').length > 5, 'dimmed');
+  eq(mm.highlight(/^ordered/), 2); eq(mm.highlight(null), 0); eq(mmEl.querySelectorAll('.mm-node.is-dimmed').length, 0);
+});
+await test('select / navigate / keyboard keys emit events', () => {
+  mm.expandAll(); mm.select(mm.tree.id); eq(mm.getSelection(), mm.tree.id);
+  mm.navigate('right'); eq(mm.getNode(mm.getSelection()).text, 'Heading 1');
+  mm.navigate('right'); mm.navigate('down'); eq(mm.getNode(mm.getSelection()).text, 'Sub A');
+  mm.navigate('left'); eq(mm.getNode(mm.getSelection()).text, 'Heading 1');
+  const key = (k, init = {}) => mm.getSVG().dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
+  mm.select(SUBA.id);
+  const before = events.length;
+  key('Tab'); key('Enter'); key('Delete'); key(' ');
+  const kinds = events.slice(before).map(e => e[0]);
+  // Enter and Tab both create a child on a selected node (sibling creation happens from a NEW node's editor via Enter)
+  assert(kinds.filter(k => k === 'node:add-child').length >= 2 && !kinds.includes('node:add-sibling') && kinds.includes('node:delete') && kinds.includes('node:toggle'), kinds.join(','));
+  key('Escape'); eq(mm.getSelection(), null);
+  assert(mmEl.querySelector('.mm-live').getAttribute('aria-live') === 'polite', 'live region');
+});
+await test('click toggle / wikilink / tag / checkbox delegation', () => {
+  mm.expandAll();
+  const before = events.length;
+  mmEl.querySelector('.mm-check').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  mmEl.querySelector('a.internal-link').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  mmEl.querySelector('a.tag').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  mmEl.querySelector(`.mm-node[data-id="${SUBA.id}"] .mm-toggle`).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  assert(mm.isCollapsed(SUBA.id) && !mmEl.querySelector('.mm-check'), 'collapsed subtree removed from DOM');
+  const got = events.slice(before);
+  assert(got.some(e => e[0] === 'node:toggle'), 'toggle'); assert(got.some(e => e[0] === 'link:click' && e[1].type === 'wikilink' && e[1].target === 'Note'), 'wikilink');
+  assert(got.some(e => e[0] === 'link:click' && e[1].type === 'tag' && e[1].target === '#tag1'), 'tag'); assert(got.some(e => e[0] === 'node:check'), 'check');
+  mm.expandAll();
+});
+await test('inline edit emits node:edit with new text', () => {
+  mm.startEdit(ITEM2.id); assert(mm.isEditing(), 'editing');
+  const ed = mmEl.querySelector('.mm-editor'); eq(ed.textContent, 'item 2 `code`');
+  ed.textContent = 'edited'; ed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  const e = events.findLast(x => x[0] === 'node:edit'); assert(e && e[1].text === 'edited' && e[1].id === ITEM2.id, 'node:edit payload');
+  assert(!mm.isEditing() && !mmEl.querySelector('.mm-editor'), 'editor removed');
+});
+await test('contextmenu event', () => {
+  mmEl.querySelector(`.mm-node[data-id="${ITEM2.id}"]`).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+  const e = events.findLast(x => x[0] === 'node:contextmenu'); assert(e && e[1].id === ITEM2.id);
+});
+await test('fit / zoom / setTransform / centerNode / view:transform', () => {
+  let n = 0; const off = mm.on('view:transform', () => n++);
+  mm.fit(40, false); const t1 = mm.getTransform(); assert(t1.k > 0 && n >= 1);
+  mm.zoomBy(2); mm.setTransform({ x: 1, y: 2, k: 1.5 }); const t2 = mm.getTransform(); eq(t2.k, 1.5); eq(t2.x, 1);
+  mm.centerNode(ITEM2.id, false); assert(mm.getTransform().x !== 1); off();
+});
+await test('options: direction/lineStyle/nodeShape/theme re-render', () => {
+  mm.setOptions({ direction: 'both', lineStyle: 'angled', nodeShape: 'rounded', theme: 'light' });
+  assert(mmEl.classList.contains('theme-light')); assert(mmEl.querySelector('.mm-node.is-shape-rounded rect[rx="6"]'), 'rounded rect');
+  assert(mmEl.querySelector('.mm-link').getAttribute('d').includes('H'), 'angled path');
+  mm.setData(parseMarkdown('# A\n- a1\n# B\n# C\n- c1\n# D\n', { rootText: 'r' }));
+  assert([...mmEl.querySelectorAll('.mm-node')].some(g => g.getAttribute('transform').includes('translate(-')), 'left side nodes');
+  eq(mmEl.querySelectorAll('.mm-node').length, 7);
+  mm.setData(parseMarkdown(MD));
+  mm.setOptions({ direction: 'down' }); assert(mmEl.querySelector('.mm-link').getAttribute('d').includes('V'), 'vertical angled');
+  mm.setOptions({ direction: 'right', lineStyle: 'curved', nodeShape: 'text', theme: 'dark' });
+});
+await test('drag node onto another emits node:move', () => {
+  mm.fit(40, false);
+  const src = mmEl.querySelector(`.mm-node[data-id="${ITEM2.id}"]`), dst = mmEl.querySelector(`.mm-node[data-id="${SUBB.id}"]`);
+  const r1 = src.getBoundingClientRect(), r2 = dst.getBoundingClientRect();
+  const svg = mm.getSVG();
+  const ev = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 7, button: 0, pointerType: 'mouse', isPrimary: true }));
+  const before = events.length;
+  // midpoint rule: dropping past the target's tip (right 15%) makes it a child; the middle band means before/after
+  const rc = (dst.querySelector('.mm-content') || dst).getBoundingClientRect();
+  const tx = rc.right - 2, ty = rc.top + rc.height / 2;
+  ev('pointerdown', src, r1.left + 5, r1.top + 5); ev('pointermove', svg, r1.left + 30, r1.top + 30); ev('pointermove', svg, tx, ty); ev('pointerup', svg, tx, ty);
+  const mv = events.slice(before).find(e => e[0] === 'node:move'); assert(mv, 'node:move emitted'); eq(mv[1].newParentId, SUBB.id); eq(mv[1].id, ITEM2.id);
+});
+await test('virtualization: 1500 nodes renders < 200 ms, culls off-screen, LOD at low zoom', async () => {
+  const t = parseMarkdown(generateBigMap(1500));
+  mm.setData(t); mm.fit(40, false); await sleep(60);
+  const s = mm.getStats(); eq(s.nodes, 1500); assert(s.renderMs < 200, `render ${s.renderMs.toFixed(1)} ms`); assert(s.layoutMs < 120, `layout ${s.layoutMs.toFixed(1)} ms`);
+  mm.setTransform({ x: 20, y: 20, k: 1 }); await sleep(60);
+  const s2 = mm.getStats(); assert(s2.rendered < 400, `culled to ${s2.rendered}`); assert(s2.renderMs < 200, 'cull render fast');
+  assert(mmEl.querySelectorAll('.mm-node').length === s2.rendered, 'DOM matches stats');
+  assert(mmEl.querySelectorAll('foreignObject').length > 0, 'text rendered when zoomed in');
+});
+await test('toSVG produces standalone markup', () => {
+  mm.setData(parseMarkdown(MD));
+  const svg = mm.toSVG(); assert(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"')); assert(svg.includes('<style>') && svg.includes('mm-node') && svg.includes('foreignObject'));
+  const txt = mm.toSVG({ textMode: 'text' }); assert(!txt.includes('foreignObject') && txt.includes('<text'));
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml'); eq(doc.getElementsByTagName('parsererror').length, 0, 'well-formed');
+});
+await test('setData(null-ish) and destroy clean up', () => {
+  const el = document.createElement('div'); el.style.cssText = 'width:300px;height:200px'; document.getElementById('stage').appendChild(el);
+  const v = new MindMapView(el); v.setData(parseMarkdown('# x\n- y')); v.destroy();
+  eq(el.querySelectorAll('svg').length, 0); assert(!el.classList.contains('mm-container')); el.remove();
+});
+
+// ───────────── GraphView ─────────────
+group('GraphView');
+const gvEl = document.getElementById('gv');
+const gv = new GraphView(gvEl, {});
+await test('force simulation converges (alpha decays, positions finite, repulsion spreads nodes)', () => {
+  const sim = new ForceSimulation();
+  const nodes = Array.from({ length: 60 }, (_, i) => ({ id: i }));
+  const links = nodes.slice(1).map((n, i) => ({ source: nodes[Math.floor(i / 3)], target: n }));
+  sim.setNodes(nodes).setLinks(links);
+  for (let i = 0; i < 300; i++) sim.tick();
+  assert(sim.alpha < 0.01, 'alpha ' + sim.alpha); assert(nodes.every(n => Number.isFinite(n.x) && Number.isFinite(n.y)), 'finite');
+  let minD = Infinity; for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) minD = Math.min(minD, Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y));
+  assert(minD > 5, 'min distance ' + minD.toFixed(1));
+});
+await test('setData / filters / local graph / highlight / colorGroups / select', async () => {
+  const data = generateGraph(300, 3);
+  gv.setData(data); await sleep(80);
+  const s = gv.getStats(); eq(s.nodes, data.nodes.length); assert(s.links > 200, 'links');
+  gv.setOptions({ showTags: false }); assert(gv.getStats().nodes < data.nodes.length, 'tags filtered'); gv.setOptions({ showTags: true });
+  const hub = data.nodes.find(n => n.linkCount > 3);
+  gv.setData(data, { focus: hub.id, depth: 1 }); const local = gv.getStats().nodes; assert(local > 1 && local < data.nodes.length, 'local graph ' + local);
+  gv.setData(data);
+  assert(gv.highlight('tag:#todo') >= 1, 'tag query'); assert(gv.highlight('path:Projects') > 1, 'path query'); eq(gv.highlight(''), 0);
+  gv.setOptions({ colorGroups: [{ query: 'file:image', color: '#ff00ff' }] }); assert(gv.nodes.some(n => n.color === '#ff00ff'), 'group color applied');
+  gv.select(hub.id); eq(gv.getSelection(), hub.id);
+});
+await test('1500-node graph ticks under 40 ms per frame and draws', async () => {
+  gv.setData(generateGraph(1500, 3)); await sleep(50);
+  for (let i = 0; i < 5; i++) gv.sim.tick();
+  const t0 = performance.now(); for (let i = 0; i < 10; i++) gv.sim.tick(); const tick = (performance.now() - t0) / 10;
+  const t1 = performance.now(); gv.draw(); const draw = performance.now() - t1;
+  assert(tick < 40, `tick ${tick.toFixed(1)} ms`); assert(draw < 60, `draw ${draw.toFixed(1)} ms`);
+  console.log(`graph 1500: tick ${tick.toFixed(1)} ms, draw ${draw.toFixed(1)} ms`);
+  const svg = gv.toSVG(); assert(svg.includes('<circle') && svg.includes('<line'), 'svg export');
+});
+await test('hit test + hover / click events', async () => {
+  const data = generateGraph(40, 9); gv.setData(data); for (let i = 0; i < 200; i++) gv.sim.tick(); gv.fit(40, false); gv.draw();
+  const n = gv.nodes[0]; const t = gv.getTransform(); const r = gv.canvas.getBoundingClientRect();
+  const cx = r.left + n.x * t.k + t.x, cy = r.top + n.y * t.k + t.y;
+  let hovered = null, clicked = null;
+  gv.on('node:hover', p => { hovered = p.id; }); gv.on('node:click', p => { clicked = p.id; });
+  gv.canvas.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: cx, clientY: cy, pointerId: 3, pointerType: 'mouse' }));
+  eq(hovered, n.id, 'hover');
+  gv._onTap({ clientX: cx, clientY: cy }); eq(clicked, n.id, 'click');
+  gv.pause(); gv.resume();
+});
+
+// ───────────── CanvasView ─────────────
+group('CanvasView');
+const cvEl = document.getElementById('cv');
+const cv = new CanvasView(cvEl, {});
+let changes = 0; cv.on('change', () => changes++);
+await test('setData renders cards, groups, edges with arrows and labels', () => {
+  cv.setData(sampleCanvas());
+  eq(cvEl.querySelectorAll('.cv-node').length, 6); eq(cvEl.querySelectorAll('.cv-edge-g').length, 4);
+  assert(cvEl.querySelector('.cv-node.is-group .cv-group-label').textContent === 'Mind Map engine', 'group label');
+  assert(cvEl.querySelector('.cv-edge-label').textContent === 'tree', 'edge label');
+  assert(cvEl.querySelector('.cv-node[data-type="file"] .cv-file-name').textContent.includes('Architecture.md'), 'file card');
+  assert(cvEl.querySelector('.cv-node[data-type="link"] .cv-link-host').textContent === 'jsoncanvas.org', 'link card');
+  assert(cvEl.querySelector('.cv-node[data-type="text"] h1'), 'markdown heading in card');
+  eq(cvEl.querySelector('.cv-node[data-id="a"]').style.getPropertyValue('--cv-node-color'), '#08b94e');
+});
+await test('addNode / addEdge / getData / remove / change events', () => {
+  const before = changes;
+  const id = cv.addNode({ type: 'text', text: 'hello', x: 1000, y: 10 }); assert(cv.getNode(id));
+  const eid = cv.addEdge({ fromNode: 'a', toNode: id, label: 'new' }); const e = cv.getEdge(eid); eq(e.fromSide, 'right'); eq(e.toSide, 'left');
+  eq(cv.getData().nodes.length, 7); eq(cv.getData().edges.length, 5);
+  cv.remove([id]); eq(cv.getData().nodes.length, 6); eq(cv.getData().edges.length, 4, 'dangling edge removed');
+  eq(changes - before, 3);
+  assert(JSON.stringify(cv.getData()).includes('"fromSide"'), 'json canvas fields');
+});
+await test('selection, drag, delete key, double-click creates card', () => {
+  cv.select('a'); deepEq(cv.getSelection(), ['a']); cv.select('b', { additive: true }); eq(cv.getSelection().length, 2);
+  const a = cv.getNode('a'); const el = cvEl.querySelector('.cv-node[data-id="a"]'); const r = el.getBoundingClientRect();
+  const ev = (type, target, x, y, extra = {}) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 5, button: 0, pointerType: 'mouse', isPrimary: true, ...extra }));
+  const x0 = a.x, y0 = a.y;
+  ev('pointerdown', el.querySelector('.cv-body'), r.left + 20, r.top + 20); ev('pointermove', cvEl, r.left + 60, r.top + 50); ev('pointerup', cvEl, r.left + 60, r.top + 50);
+  const k = cv.getTransform().k; eq(Math.round(a.x - x0), Math.round(40 / k)); eq(Math.round(a.y - y0), Math.round(30 / k));
+  const before = cv.getData().nodes.length;
+  cv.select('e'); cvEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+  eq(cv.getData().nodes.length, before - 1); eq(cv.getData().edges.length, 3);
+  cv.input.onDoubleTap({ target: cvEl, clientX: r.left - 300, clientY: r.top - 200 });
+  eq(cv.getData().nodes.length, before, 'new card added'); assert(cv.input.editing, 'editing new card'); cv.input.commitEdit();
+});
+await test('connect by dragging a side handle', () => {
+  cv.setData(sampleCanvas());
+  const src = cvEl.querySelector('.cv-node[data-id="c"] .cv-handle-connect[data-side="right"]');
+  const dst = cvEl.querySelector('.cv-node[data-id="d"]'); const rs = src.getBoundingClientRect(), rd = dst.getBoundingClientRect();
+  const ev = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 6, button: 0, pointerType: 'mouse', isPrimary: true }));
+  ev('pointerdown', src, rs.left + 5, rs.top + 5); ev('pointermove', cvEl, rd.left + 30, rd.top + 30); ev('pointermove', cvEl, rd.left + 40, rd.top + 40); ev('pointerup', cvEl, rd.left + 40, rd.top + 40);
+  const e = cv.getData().edges.find(x => x.fromNode === 'c' && x.toNode === 'd'); assert(e, 'edge created'); eq(e.fromSide, 'right');
+});
+await test('resize handle and inline edit', () => {
+  const n = cv.getNode('b'); const w0 = n.width;
+  const h = cvEl.querySelector('.cv-node[data-id="b"] .cv-handle-resize[data-corner="se"]'); const r = h.getBoundingClientRect();
+  const ev = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 8, button: 0, pointerType: 'mouse', isPrimary: true }));
+  ev('pointerdown', h, r.left + 5, r.top + 5); ev('pointermove', cvEl, r.left + 65, r.top + 45); ev('pointerup', cvEl, r.left + 65, r.top + 45);
+  assert(n.width > w0, 'wider');
+  cv.input.startEdit('b'); const ta = cvEl.querySelector('.cv-editor'); assert(ta, 'textarea'); ta.value = 'changed'; cv.input.commitEdit(); eq(cv.getNode('b').text, 'changed');
+  const svg = cv.toSVG(); assert(svg.includes('<rect') && svg.includes('changed'), 'svg export');
+});
+
+// ───────────── exporters ─────────────
+group('exporters');
+await test('exportMarkdown / OPML / FreeMind well-formed', () => {
+  const t = parseMarkdown(MD);
+  eq(exportMarkdown(t), treeToMarkdown(t));
+  const opml = exportOPML(t); const d = new DOMParser().parseFromString(opml, 'text/xml'); eq(d.getElementsByTagName('parsererror').length, 0); eq(d.getElementsByTagName('outline').length, 14);
+  const fm = exportFreeMind(t); const d2 = new DOMParser().parseFromString(fm, 'text/xml'); eq(d2.getElementsByTagName('parsererror').length, 0); eq(d2.getElementsByTagName('node').length, 14);
+  assert(fm.includes('button_ok'), 'checked icon');
+});
+await test('exportSVG (mind map / graph / canvas) and exportPNG blob', async () => {
+  mm.setData(parseMarkdown(MD));
+  const svg = await exportSVG(mm, { text: '#ffffff' }); assert(svg.startsWith('<?xml') && svg.includes('<svg') && svg.includes('color:#ffffff!important'));
+  assert((await exportSVG(gv)).includes('<circle')); assert((await exportSVG(cv)).includes('<rect'));
+  const png = await exportPNG(mm, { scale: 1 }); assert(png instanceof Blob && png.type === 'image/png' && png.size > 500, 'png blob ' + png.size);
+  const png2 = await exportPNG(mm, { width: 200, transparent: true, textMode: 'text' }); assert(png2.size > 100);
+});
+
+// ───────────── importers ─────────────
+group('importers');
+const crcTable = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = b => { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = crcTable[(c ^ b[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+async function deflateRaw(bytes) { const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw')); return new Uint8Array(await new Response(s).arrayBuffer()); }
+async function makeZip(files) {
+  const enc = new TextEncoder(); const parts = []; const cd = []; let offset = 0;
+  for (const [name, content, method] of files) {
+    const nameB = enc.encode(name); const raw = typeof content === 'string' ? enc.encode(content) : content;
+    const data = method === 8 ? await deflateRaw(raw) : raw; const crc = crc32(raw);
+    const lh = new DataView(new ArrayBuffer(30)); lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x800, true); lh.setUint16(8, method, true); lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, raw.length, true); lh.setUint16(26, nameB.length, true);
+    parts.push(new Uint8Array(lh.buffer), nameB, data);
+    const ch = new DataView(new ArrayBuffer(46)); ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x800, true); ch.setUint16(10, method, true); ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, raw.length, true); ch.setUint16(28, nameB.length, true); ch.setUint32(42, offset, true);
+    cd.push(new Uint8Array(ch.buffer), nameB);
+    offset += 30 + nameB.length + data.length;
+  }
+  const cdBytes = cd.reduce((a, b) => a + b.length, 0);
+  const eocd = new DataView(new ArrayBuffer(22)); eocd.setUint32(0, 0x06054b50, true); eocd.setUint16(8, files.length, true); eocd.setUint16(10, files.length, true); eocd.setUint32(12, cdBytes, true); eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...cd, new Uint8Array(eocd.buffer)], { type: 'application/zip' });
+}
+const XMIND_JSON = JSON.stringify([{ title: 'Sheet 1', rootTopic: { title: 'Central', notes: { plain: { content: 'root note' } }, children: { attached: [
+  { title: 'Alpha', markers: [{ markerId: 'task-done' }], children: { attached: [{ title: 'Alpha 1' }, { title: 'Alpha 2', href: 'https://example.com', labels: ['lbl'] }] } },
+  { title: 'Beta', markers: [{ markerId: 'task-start' }] }] } } }]);
+const XMIND_XML = `<?xml version="1.0"?><xmap-content xmlns="urn:xmind:xmap:xmlns:content:2.0" version="2.0"><sheet id="s1"><topic id="t1"><title>Legacy root</title><children><topics type="attached"><topic id="t2"><title>Child A</title><children><topics type="attached"><topic id="t3"><title>Grandchild</title></topic></topics></children></topic><topic id="t4"><title>Child B</title></topic></topics></children></topic></sheet></xmap-content>`;
+await test('readZip: stored + deflate entries (zip built in-page with CompressionStream)', async () => {
+  const zip = await makeZip([['content.json', XMIND_JSON, 8], ['META-INF/manifest.xml', '<manifest/>', 0], ['resources/big.txt', 'x'.repeat(50000), 8]]);
+  const entries = await readZip(zip);
+  eq(entries.size, 3); eq(new TextDecoder().decode(entries.get('content.json')), XMIND_JSON); eq(entries.get('resources/big.txt').length, 50000);
+  eq(new TextDecoder().decode(entries.get('META-INF/manifest.xml')), '<manifest/>');
+  const fromBuffer = await readZip(await zip.arrayBuffer()); eq(fromBuffer.size, 3);
+  let threw = false; try { await readZip(new Blob(['not a zip at all'])); } catch { threw = true; } assert(threw, 'rejects non-zip');
+});
+await test('xmindToMarkdown: content.json (2020+) with markers/notes/links and legacy content.xml', async () => {
+  const md = xmindToMarkdown(await readZip(await makeZip([['content.json', XMIND_JSON, 8]])));
+  assert(md.startsWith('# Central\n\nroot note\n- [x] Alpha\n  - Alpha 1\n  - [Alpha 2](https://example.com) #lbl\n- [ ] Beta'), md);
+  const t = parseMarkdown(md); eq(t.text, 'Central'); eq(t.children[1].children.length, 2);
+  const legacy = xmindToMarkdown(await readZip(await makeZip([['content.xml', XMIND_XML, 0]])));
+  eq(legacy, '# Legacy root\n- Child A\n  - Grandchild\n- Child B\n');
+});
+await test('mindmeisterToMarkdown (map.json) / OPML / FreeMind / tab outline / JSON Canvas', async () => {
+  const mm = mindmeisterToMarkdown(await readZip(await makeZip([['map.json', JSON.stringify({ root: { title: 'MM root', children: [{ title: 'one', note: 'n', children: [{ title: 'two', link: 'https://m.m' }] }, { title: 'three', task: { done: true } }] } }), 8]])));
+  eq(mm, '# MM root\n- one\n  - *n*\n  - [two](https://m.m)\n- [x] three\n');
+  const opml = opmlToMarkdown('<?xml version="1.0"?><opml version="2.0"><head><title>T</title></head><body><outline text="Root"><outline text="A" _note="note a"><outline text="A1"/></outline><outline text="B" _status="checked"/></outline></body></opml>');
+  eq(opml, '# Root\n- A\n  - *note a*\n  - A1\n- [x] B\n');
+  const multi = opmlToMarkdown('<opml version="2.0"><head><title>Many</title></head><body><outline text="X"/><outline text="Y"/></body></opml>'); eq(multi, '# Many\n- X\n- Y\n');
+  const fm = freemindToMarkdown('<map version="1.0.1"><node TEXT="FM root"><node TEXT="c1" POSITION="right"><icon BUILTIN="button_ok"/><node TEXT="c1.1" LINK="https://f.m"/></node><node><richcontent TYPE="NODE"><html><body><p>rich <b>text</b></p></body></html></richcontent></node></node></map>');
+  eq(fm, '# FM root\n- [x] c1\n  - [c1.1](https://f.m)\n- rich text\n');
+  eq(outlineTextToMarkdown('Root\n\tA\n\t\tA1\n\tB\n'), '# Root\n- A\n  - A1\n- B\n');
+  eq(outlineTextToMarkdown('A\n  A1\nB\n', 'Doc'), '# Doc\n- A\n  - A1\n- B\n');
+  const cmd = canvasToMarkdown(sampleCanvas(), 'Board'); assert(cmd.startsWith('# Board\n- Mind Map engine\n  - Parser'), cmd); assert(cmd.includes('- [[Notes/Architecture.md]]') && cmd.includes('- https://jsoncanvas.org') && cmd.includes('- Graph view'), cmd);
+});
+await test('importFile dispatches by extension and returns {name, markdown, canvas?}', async () => {
+  const opmlFile = new File(['<opml version="2.0"><body><outline text="R"><outline text="k"/></outline></body></opml>'], 'my-outline.opml');
+  const r1 = await importFile(opmlFile); eq(r1.name, 'my-outline'); eq(r1.markdown, '# R\n- k\n');
+  const r2 = await importFile(new File([JSON.stringify(sampleCanvas())], 'board.canvas')); assert(r2.canvas && r2.canvas.nodes.length === 6 && r2.markdown.startsWith('# board'));
+  const zipBlob = await makeZip([['content.json', XMIND_JSON, 8]]);
+  const r3 = await importFile(new File([zipBlob], 'brain.xmind')); assert(r3.markdown.startsWith('# Central'));
+  const r4 = await importFile(new File([await makeZip([['map.json', JSON.stringify({ root: { title: 'Z', children: [] } }), 0]])], 'z.mind')); eq(r4.markdown, '# Z\n');
+  const r5 = await importFile(new File(['# Hello\n- a'], 'n.md')); eq(r5.markdown, '# Hello\n- a');
+  const r6 = await importFile(new File(['Top\n\tkid'], 'plain.txt')); eq(r6.markdown, '# Top\n- kid\n');
+  const r7 = await importFile(new File(['<map version="1.0"><node TEXT="m"/></map>'], 'weird.xml')); eq(r7.markdown, '# m\n');
+  const r8 = await importFile(new File([XMIND_JSON], 'sheet.json')); assert(r8.markdown.startsWith('# Central'));
+});
+
+// ───────────── summary ─────────────
+const total = results.pass + results.fail;
+const sum = document.getElementById('summary');
+sum.textContent = `${results.pass} PASS / ${results.fail} FAIL (of ${total})`;
+sum.className = results.fail ? 'bad' : 'ok';
+document.title = `${results.fail ? 'FAIL' : 'PASS'} ${results.pass}/${total} — Engine tests`;
+window.__results = results;
+console.log('TESTS DONE', JSON.stringify(results));
+</script>
+</body>
+</html>
